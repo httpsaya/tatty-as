@@ -1,144 +1,131 @@
-# Python Modules
 import json
-from typing import Any
-
-# Channel Modules
 from channels.generic.websocket import AsyncWebsocketConsumer
-from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async
+from rest_framework_simplejwt.tokens import AccessToken
+from django.contrib.auth import get_user_model
+from ..models import Comment, Dish
+from apps.notifications.models import Notification
 
-# Project Modules
-from apps.canteen.models import Comment, Dish, DailyMenu
+User = get_user_model()
 
 
 class CommentConsumer(AsyncWebsocketConsumer):
-    """
-    WebSocket consumer для комментариев.
-    Поддерживает два режима:
-      ws://…/ws/comments/dish/{dish_id}/
-      ws://…/ws/comments/menu/{menu_id}/
-    """
 
-    # ── connect ───────────────────────────────────────────────────────────
+    async def connect(self):
+        self.dish_id = self.scope['url_route']['kwargs']['dish_id']
+        self.room_group_name = f'comments_dish_{self.dish_id}'
 
-    async def connect(self) -> None:
-        user = self.scope["user"]
+        token_str = self.scope['query_string'].decode()
+        token = token_str.split('token=')[-1] if 'token=' in token_str else None
+        self.user = await self.get_user_from_token(token)
 
-        # Закрываем соединение если пользователь не аутентифицирован
-        if not user.is_authenticated:
-            await self.close(code=4001)
-            return
-
-        url_kwargs: dict[str, Any] = self.scope["url_route"]["kwargs"]
-        self.dish_id: int | None = url_kwargs.get("dish_id")
-        self.menu_id: int | None = url_kwargs.get("menu_id")
-
-        # Формируем имя группы в зависимости от типа объекта
-        if self.dish_id:
-            self.group_name = f"comments_dish_{self.dish_id}"
-        elif self.menu_id:
-            self.group_name = f"comments_menu_{self.menu_id}"
-        else:
-            await self.close(code=4002)
-            return
-
-        await self.channel_layer.group_add(self.group_name, self.channel_name)
-        await self.accept()
-
-        # Отправить историю комментариев сразу после подключения
-        old_comments = await self.get_comments()
-        for comment in old_comments:
+        if self.user:
+            await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+            await self.accept()
+            comments = await self.get_comment_history()
             await self.send(text_data=json.dumps({
-                "type":       "comment.history",
-                "author":     comment["author__email"],
-                "text":       comment["text"],
-                "created_at": comment["created_at__isoformat"]
-                              if "created_at__isoformat" in comment
-                              else str(comment.get("created_at", "")),
-            }, ensure_ascii=False))
+                'type': 'comment.history',
+                'comments': comments
+            }))
+        else:
+            await self.close()
 
-    # ── disconnect ────────────────────────────────────────────────────────
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
 
-    async def disconnect(self, close_code: int) -> None:
-        if hasattr(self, "group_name"):
-            await self.channel_layer.group_discard(
-                self.group_name,
-                self.channel_name,
+    async def receive(self, text_data):
+        data = json.loads(text_data)
+        text = data.get('text', '').strip()
+        if not text or not self.user:
+            return
+
+        comment, dish = await self.save_comment(text)
+
+        # Рассылаем комментарий всем в WS группе
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'comment_message',
+                'comment_id': str(comment.id),
+                'author': self.user.username,
+                'text': text,
+                'created_at': str(comment.created_at),
+            }
+        )
+
+        # SSE-уведомление в canteen группу (для фронта)
+        canteen_id = await self.get_canteen_id(dish)
+        if canteen_id:
+            await self.channel_layer.group_send(
+                f'canteen_{canteen_id}',
+                {
+                    'type': 'dailymenu.message',
+                    'data': {
+                        'event': 'post.message',
+                        'message': f'{self.user.username} оставил комментарий к «{dish.name}»',
+                    }
+                }
             )
 
-    # ── receive ───────────────────────────────────────────────────────────
-
-    async def receive(self, text_data: str | None = None) -> None:
-        user = self.scope["user"]
-
-        # Двойная проверка — токен мог протухнуть после connect
-        if not user.is_authenticated:
-            await self.close(code=4001)
-            return
-
-        try:
-            data: dict = json.loads(text_data or "{}")
-            text: str = data["text"].strip()
-            if not text:
-                raise ValueError("Empty comment")
-        except (KeyError, ValueError) as e:
-            await self.send(text_data=json.dumps({
-                "type":  "error",
-                "error": str(e),
-            }))
-            return
-
-        # Сохраняем в БД
-        comment = await self.save_comment(user, text)
-
-        # Рассылаем всем в группе
-        await self.channel_layer.group_send(
-            self.group_name,
-            {
-                "type":       "comment.new",   # → метод comment_new
-                "comment_id": comment.id,
-                "author":     user.email,
-                "text":       text,
-            },
-        )
-
-    # ── handlers ─────────────────────────────────────────────────────────
-
-    async def comment_new(self, event: dict) -> None:
-        """Channels вызывает этот метод когда приходит событие comment.new"""
+    async def comment_message(self, event):
         await self.send(text_data=json.dumps({
-            "type":       "comment.new",
-            "comment_id": event["comment_id"],
-            "author":     event["author"],
-            "text":       event["text"],
-        }, ensure_ascii=False))
+            'type': 'comment.new',
+            'comment_id': event['comment_id'],
+            'author': event['author'],
+            'text': event['text'],
+            'created_at': event['created_at'],
+        }))
 
-    # ── ORM (sync_to_async) ───────────────────────────────────────────────
+    @database_sync_to_async
+    def get_user_from_token(self, token):
+        try:
+            if token:
+                access_token = AccessToken(token)
+                return User.objects.get(id=access_token['user_id'])
+        except Exception:
+            pass
+        return None
 
-    @sync_to_async
-    def get_comments(self) -> list[dict]:
-        qs = Comment.objects.select_related("author")
+    @database_sync_to_async
+    def get_comment_history(self):
+        comments = Comment.objects.filter(
+            dish_id=self.dish_id, is_visible=True
+        ).select_related('author').order_by('created_at')[:50]
+        return [
+            {'id': str(c.id), 'author': c.author.username, 'text': c.text, 'created_at': str(c.created_at)}
+            for c in comments
+        ]
 
-        if self.dish_id:
-            qs = qs.filter(dish_id=self.dish_id)
-        elif self.menu_id:
-            qs = qs.filter(daily_menu_id=self.menu_id)
-
-        return list(
-            qs.order_by("created_at")
-            .values("author__email", "text", "created_at")
+    @database_sync_to_async
+    def save_comment(self, text):
+        dish = Dish.objects.select_related('canteen__school').get(id=self.dish_id)
+        comment = Comment.objects.create(
+            author=self.user, dish=dish, text=text, is_visible=True
         )
 
-    @sync_to_async
-    def save_comment(self, user, text: str) -> Comment:
-        """
-        Создаёт Comment и возвращает инстанс.
-        author — объект User, не email.
-        """
-        kwargs = {"author": user, "text": text}
+        # Создаём Notification для всех пользователей школы (кроме автора)
+        from django.db.models import Q
+        from apps.auths.models import CustomUser
 
-        if self.dish_id:
-            kwargs["dish_id"] = self.dish_id
-        elif self.menu_id:
-            kwargs["daily_menu_id"] = self.menu_id
+        users = CustomUser.objects.filter(
+            Q(school=dish.canteen.school) | Q(is_superuser=True),
+            is_active=True
+        ).exclude(id=self.user.id)
 
-        return Comment.objects.create(**kwargs)
+        Notification.objects.bulk_create([
+            Notification(
+                user=u,
+                type='comment',
+                title=f'Новый комментарий к «{dish.name}»',
+                message=f'{self.user.username}: {text[:100]}',
+                is_read=False,
+                related_object_type='comment',
+            )
+            for u in users
+        ], ignore_conflicts=True)
+
+        return comment, dish
+
+    @database_sync_to_async
+    def get_canteen_id(self, dish):
+        return dish.canteen.id

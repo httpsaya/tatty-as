@@ -17,6 +17,8 @@ constantly==23.10.4
 cryptography==46.0.7
 daphne==4.2.1
 Django==5.0
+django-cors-headers==4.9.0
+django-extensions==4.1
 django-flower==1.0.0
 django-jinja==2.11.0
 django-redis==6.0.0
@@ -25,6 +27,7 @@ djangorestframework_simplejwt==5.5.1
 drf-spectacular==0.29.0
 gevent==26.4.0
 greenlet==3.4.0
+h11==0.16.0
 humanize==0.5.1
 hyperlink==21.0.0
 idna==3.11
@@ -64,6 +67,7 @@ tzdata==2026.1
 tzlocal==5.3.1
 ujson==5.12.0
 uritemplate==4.2.0
+uvicorn==0.46.0
 vine==5.1.0
 wcwidth==0.6.0
 zope.event==6.1

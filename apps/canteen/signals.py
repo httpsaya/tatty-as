@@ -1,7 +1,15 @@
+# Python Modules
 from typing import Any
+
+# Django Modules
 from django.db.models.signals import m2m_changed
+from django.db.models import Q
 from django.dispatch import receiver
+
+# Project Modules
 from apps.canteen.models import DailyMenu
+
+# Channel Modules
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
@@ -33,20 +41,20 @@ def menu_dishes_changed(sender, instance, action, **kwargs: dict[str, Any]):
             {'type': 'dailymenu.message', 'data': payload}
         )
 
-    # ── 2. Notifications в БД ──
+    # ── 2. Уведомления в БД ──
     try:
         from apps.notifications.models import Notification
         from apps.auths.models import CustomUser
 
         users = CustomUser.objects.filter(
-            school=instance.canteen.school,
+            Q(school=instance.canteen.school) | Q(is_superuser=True),
             is_active=True
         )
 
         Notification.objects.bulk_create([
             Notification(
                 user=user,
-                type='post',  # ближайший подходящий тип из choices
+                type='post',
                 title="Обновление меню",
                 message=message_text,
                 is_read=False,

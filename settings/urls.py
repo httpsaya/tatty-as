@@ -6,4 +6,5 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('auth/', include('apps.auths.urls')),
     path('canteen/', include('apps.canteen.urls')),
+    path('notification/', include('apps.notifications.urls'))
 ]

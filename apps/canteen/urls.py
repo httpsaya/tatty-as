@@ -5,7 +5,12 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 # Project Modules
-from .views import CanteenViewSet, DishViewSet, DailyMenuViewSet
+from .views import CanteenViewSet, DishViewSet, DailyMenuViewSet, DishReactionViewSet
+
+# your_app/urls.py
+from django.urls import path
+from . import views
+
 
 router: DefaultRouter = DefaultRouter()
 
@@ -23,6 +28,11 @@ router.register(
     prefix='daylymenu',
     basename='daylymenu',
     viewset=DailyMenuViewSet
+)
+router.register(
+    prefix='reactions', 
+    basename='reactions', 
+    viewset=DishReactionViewSet
 )
 
 urlpatterns = [

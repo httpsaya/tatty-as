@@ -30,6 +30,8 @@ class UserLoginResponseSerializer(Serializer):
     email = EmailField()
     access = CharField()
     refresh = CharField()
+    school_name = CharField(source='school.name', read_only=True)
+    
 
     class Meta:
         """Customization of the Serializer metadata."""
@@ -40,6 +42,7 @@ class UserLoginResponseSerializer(Serializer):
             "email",
             "access",
             "refresh",
+            'school_name', 
         )
 
 
@@ -222,7 +225,10 @@ class HTTP405MethodNotAllowedSerializer(Serializer):
 
 # User Profile 
 class ProfileSerializer(ModelSerializer):
-    """Serializer for profile model"""
+    # Добавляем поле школы из связанной модели User
+    school = IntegerField(source='user.school.id', read_only=True)
+    school_name = CharField(source='user.school.name', read_only=True)
+
     class Meta:
         model = Profile
         fields = [
@@ -235,9 +241,11 @@ class ProfileSerializer(ModelSerializer):
             'is_verified',
             'avatar',
             'gender',
-            'updated_at'
+            'updated_at',
+            'school',      # ID школы
+            'school_name'  # Название школы
         ]
-        read_only_fields = ['id', 'user', 'updated_at']
+        read_only_fields = ['id', 'user', 'updated_at', 'school_name']
 
 
 class UserWithProfileSerializer(ModelSerializer):
@@ -269,7 +277,9 @@ class UserWithProfileSerializer(ModelSerializer):
 
 
 class ProfileUpdateSerializer(ModelSerializer):
-    """Serializer for updating profile information"""
+    # Поле для смены школы (передаем только ID)
+    school_id = IntegerField(write_only=True, required=False)
+
     class Meta:
         model = Profile
         fields = [
@@ -278,7 +288,41 @@ class ProfileUpdateSerializer(ModelSerializer):
             'location',
             'interests', 
             'avatar',
-            'gender'
+            'gender',
+            'school_id'
+        ]
+
+    def update(self, instance, validated_data):
+        # Извлекаем school_id для обновления модели User
+        school_id = validated_data.pop('school_id', None)
+        if school_id:
+            user = instance.user
+            user.school_id = school_id
+            user.save(update_fields=['school'])
+        
+        return super().update(instance, validated_data)
+
+
+class UserProfileSerializer(ModelSerializer):
+    # Поля из модели CustomUser (через source)
+    school_id = IntegerField(source='user.school.id', read_only=True)
+    school_name = CharField(source='user.school.name', read_only=True)
+    email = EmailField(source='user.email', read_only=True)
+    full_name = CharField(source='user.full_name', read_only=True)
+
+    class Meta:
+        model = Profile
+        fields = [
+            'display_name',
+            'bio',
+            'location', 
+            'interests',
+            'avatar',
+            'gender',
+            'school_id',
+            'school_name',
+            'email',
+            'full_name'
         ]
 
 

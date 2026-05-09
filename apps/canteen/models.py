@@ -65,7 +65,12 @@ class Dish(AbstractBaseModel):
 
     DISH_NAME_MAX_LENGTH=150
     PRICE_MAX_LENGTH=10
-
+    
+    canteen = ForeignKey(
+        Canteen, 
+        on_delete=CASCADE, 
+        related_name='dishes'
+    )
     category = ForeignKey(
         FoodCategory, 
         on_delete=CASCADE, 

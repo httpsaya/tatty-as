@@ -33,12 +33,15 @@ class FoodCategorySerializer(ModelSerializer):
 
 
 class DishSerializer(ModelSerializer):
+    # Добавляем название категории, чтобы фронтенд мог группировать блюда
+    category_name = CharField(source='category.name', read_only=True)
 
     class Meta:
         model = Dish
         fields = (
             'id',
             'category',
+            'category_name', # Это поле критично для группировки в App.js
             'name',
             'description',
             'price',
@@ -47,13 +50,37 @@ class DishSerializer(ModelSerializer):
         )
 
 
-class DailyMenuSerializer(ModelSerializer):
+# class DailyMenuSerializer(ModelSerializer):
+#     # Добавляем вложенный сериализатор, чтобы получить объекты блюд, а не их ID
+#     dishes = DishSerializer(many=True, read_only=True)
+    
+#     # Достаем название столовой (опционально, для отладки)
+#     canteen_name = CharField(source='canteen.name', read_only=True)
 
+#     class Meta:
+#         model = DailyMenu
+#         fields = (
+#             'id',
+#             'canteen',
+#             'canteen_name',
+#             'date',
+#             'dishes', # Теперь здесь будут объекты
+#         )
+
+
+class DailyMenuSerializer(ModelSerializer):
+    # Для отображения на фронте (read_only=True)
+    dishes_details = DishSerializer(source='dishes', many=True, read_only=True)
+    
     class Meta:
         model = DailyMenu
         fields = (
-            'id',
-            'canteen',
-            'date',
-            'dishes',
+            'id', 
+            'canteen', 
+            'date', 
+            'dishes',         # Сюда фронтенд будет слать список ID [1, 2, 3]
+            'dishes_details', # А отсюда забирать полные объекты
         )
+        extra_kwargs = {
+            'dishes': {'write_only': True} # Мы только пишем ID, но не читаем их в этом поле
+        }

@@ -24,7 +24,7 @@ from rest_framework.decorators import action
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 # Project modules
-from apps.auths.models import CustomUser, Profile
+from apps.auths.models import CustomUser, Profile, School
 from apps.auths.serializers import (
     UserLoginSerializer, 
     UserLoginResponseSerializer, 
@@ -36,6 +36,7 @@ from apps.auths.serializers import (
     ProfileUpdateSerializer,
     ProfileSerializer,
     ProfileUpdateErrorsSerializer,
+    UserProfileSerializer,
     )
 from apps.abstracts.decorators import validate_serializer_data
 
@@ -56,31 +57,36 @@ class CustomUserViewSet(ViewSet):
     )
     @validate_serializer_data(serializer_class=UserLoginSerializer)
     def login(
-        self,
-        request: DRFRequest,
-        *args: tuple[Any, ...],
-        **kwargs: dict[str, Any]
-    ) -> DRFResponse:
+        self, 
+        request: DRFRequest, 
+        *args: tuple[Any, ...], 
+        **kwargs: dict[str, Any],
+        ) -> DRFResponse:
 
-        serializer: UserLoginSerializer = kwargs["serializer"]
-
-        user: CustomUser = serializer.validated_data.pop("user")
-
-        # Generate JWT tokens
+        serializer_input: UserLoginSerializer = kwargs["serializer"]
+        user: CustomUser = serializer_input.validated_data.pop("user")
+        # Генерируем токены
+        
         refresh_token: RefreshToken = RefreshToken.for_user(user)
-        access_token: str = str(refresh_token.access_token)
-
+        # Формируем данные для ответа
+        # # Мы передаем объект целиком в UserLoginResponseSerializer
+        response_data = {
+            "id": user.id,
+            "full_name": user.full_name,
+            "email": user.email,
+            "access": str(refresh_token.access_token),
+            "refresh": str(refresh_token),
+            "school": user.school # Передаем объект школы сюда
+        }
+        
+        # ВАЖНО: Прогоняем через ResponseSerializer, чтобы сработал source='school.name'
+        final_serializer = UserLoginResponseSerializer(response_data)
+        
         return DRFResponse(
-            data={
-                "id": user.id,
-                "full_name": user.full_name,
-                "email": user.email,
-                "access": access_token,
-                "refresh": str(refresh_token),
-            },
+            data=final_serializer.data,
             status=HTTP_200_OK
         )
-
+    
 
     @action(
         methods=("GET",),
@@ -224,28 +230,40 @@ class CustomUserViewSet(ViewSet):
             profile.refresh_from_db()
             return DRFResponse(ProfileSerializer(profile).data, status=HTTP_200_OK)
 
-    # def get_chat_messages(self, request: DRFRequest, *args: tuple[Any, ...], **kwargs: dict[str, Any]) -> DRFResponse:
-        
-    #     chat_id: int | None  = int(request.data.get("chat_id"))
-    #     last_message_id: int | None = int(request.data.get("last_message_id"))
+    
+    @action(
+        methods=['GET', 'PATCH'],
+        detail=False,
+        url_path='my-profile',
+        url_name='my_profile',
+        permission_classes=(IsAuthenticated,)
+    )
+    def my_profile(
+        self, 
+        request: DRFRequest,
+        *args: tuple[Any, ...],
+        **kwargs: dict[str, Any],
+        ) -> DRFResponse:
 
-    #     messages: QuerySet[Model] = Model.objects.filter(chat_id=chat_id)
-    #     if last_message_id:
-    #         messages = Model.objects.filter(id__gt=last_message_id)
+        user = request.user
+        # Автоматически создаем профиль, если его еще нет
+        profile, _ = Profile.objects.get_or_create(user=user)
 
-    #     response_msgs: list[dict] = []
+        if request.method == 'GET':
+            serializer = UserProfileSerializer(profile)
+            # Также добавим список всех школ, чтобы фронтенд мог построить Select
+            schools = School.objects.all().values('id', 'name')
+            
+            return DRFResponse({
+                "profile": serializer.data,
+                "available_schools": list(schools)
+            }, status=HTTP_200_OK)
 
-    #     message: Model
-    #     for message in messages:
-    #         response_msgs.append({
-    #             "id": message.id,
-    #             "msg": message.text
-    #         })
-
-
-    #     return DRFResponse(
-    #         data={"messages": response_msgs},
-    #         status=HTTP_200_OK
-    #     )
-
+        elif request.method == 'PATCH':
+            serializer = ProfileUpdateSerializer(profile, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                # Возвращаем обновленные полные данные
+                return DRFResponse(UserProfileSerializer(profile).data, status=HTTP_200_OK)
+            return DRFResponse(serializer.errors, status=HTTP_400_BAD_REQUEST)
    

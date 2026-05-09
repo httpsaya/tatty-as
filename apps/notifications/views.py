@@ -1,189 +1,91 @@
-# Python Modules
 import asyncio
 import json
 from typing import Any
 
-# Django Modules
-from django.shortcuts import get_object_or_404, render
-
-# Project Modules
-from apps.canteen.models import DailyMenu
-from apps.notifications.models import Notification
-from .serializers import NotificationSerializer
-
-# Channel Modules
-from channels.layers import get_channel_layer
-
-# DRF Modules
+from django.http.response import StreamingHttpResponse
+from rest_framework.viewsets import ViewSet
 from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request as DRFRequest
 from rest_framework.response import Response as DRFResponse
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.status import HTTP_200_OK
-from rest_framework.viewsets import ViewSet
+from channels.layers import get_channel_layer
 
-# Django async
-from django.http.response import StreamingHttpResponse
+from rest_framework_simplejwt.tokens import AccessToken
+from django.contrib.auth import get_user_model
+
+from apps.notifications.models import Notification
+from .serializers import NotificationSerializer
+
+User = get_user_model()
 
 
-# ───────────────────────────────────────────────
-# SSE — Server-Sent Events
-# ───────────────────────────────────────────────
+async def sse_notifications(request):
+    canteen_id = request.GET.get('canteen_id')
+    token_key  = request.GET.get('token')
 
-async def sse_notifications(request) -> StreamingHttpResponse:
-    """
-    Стримит события меню и реакций конкретному пользователю.
-    Подписывается на:
-      - post_stream          (глобальные обновления меню)
-      - canteen_{canteen_id} (обновления конкретной столовой, если известна)
-    """
+    if not canteen_id:
+        return StreamingHttpResponse(status=400)
+
+    # ── Аутентификация по токену из query params ──
+    try:
+        validated = AccessToken(token_key)
+        user = await User.objects.aget(id=validated['user_id'])
+    except Exception:
+        return StreamingHttpResponse(status=401)
+
     channel_layer = get_channel_layer()
-
-    # Определяем canteen_id из query-параметра (?canteen_id=1)
-    canteen_id: str | None = request.GET.get("canteen_id")
-
-    SUPPORTED_EVENTS = {"post.message", "comment.new", "reaction.updated"}
 
     async def event_stream():
         channel_name = await channel_layer.new_channel()
-
-        # Подписываемся на глобальную группу
-        await channel_layer.group_add("post_stream", channel_name)
-
-        # Подписываемся на группу конкретной столовой
-        if canteen_id:
-            await channel_layer.group_add(f"canteen_{canteen_id}", channel_name)
-
+        group_name   = f'canteen_{canteen_id}'
+        await channel_layer.group_add(group_name, channel_name)
         try:
             while True:
                 try:
                     message = await asyncio.wait_for(
                         channel_layer.receive(channel_name),
-                        timeout=30,
+                        timeout=30
                     )
-                    if message["type"] in SUPPORTED_EVENTS:
-                        data = json.dumps(
-                            {"event": message["type"], **message["data"]},
-                            ensure_ascii=False,
-                        )
-                        yield f"data: {data}\n\n"
+                    # Нормализуем тип для фронтенда
+                    if message['type'] in ('dailymenu.message', 'daily_menu_created'):
+                        payload = message.get('data', message)
+                        payload['event'] = 'daily_menu_created'  # фронт ждёт именно это
+                        yield f'data: {json.dumps(payload)}\n\n'
 
                 except asyncio.TimeoutError:
-                    # keepalive ping — браузер не закроет соединение
-                    yield ": ping\n\n"
-
+                    yield ': ping\n\n'  # keepalive
         finally:
-            await channel_layer.group_discard("post_stream", channel_name)
-            if canteen_id:
-                await channel_layer.group_discard(f"canteen_{canteen_id}", channel_name)
+            await channel_layer.group_discard(group_name, channel_name)
 
     return StreamingHttpResponse(
         event_stream(),
-        content_type="text/event-stream",
+        content_type='text/event-stream',
         headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        }
     )
 
 
-# ───────────────────────────────────────────────
-# Notifications ViewSet
-# ───────────────────────────────────────────────
-
 class NotificationViewSet(ViewSet):
-    """
-    Эндпоинты для работы с уведомлениями текущего пользователя.
 
-    GET  /notifications/count/  — количество непрочитанных
-    GET  /notifications/list/   — список с пагинацией
-    POST /notifications/read/   — пометить все как прочитанные
-    POST /notifications/read-one/{id}/ — пометить одно как прочитанное
-    """
+    @action(methods=('GET',), detail=False, url_path='count', url_name='count', permission_classes=(IsAuthenticated,))
+    def get_count(self, request: DRFRequest, *args, **kwargs) -> DRFResponse:
+        count = Notification.objects.filter(user=request.user, is_read=False).count()
+        return DRFResponse({'unread_count': count})
 
-    permission_classes = (IsAuthenticated,)
-
-    # ── GET /count/ ────────────────────────────────────────────────────────
-
-    @action(methods=("GET",), detail=False, url_path="count", url_name="count")
-    def get_count(
-        self,
-        request: DRFRequest,
-        *args: tuple[Any, ...],
-        **kwargs: dict[str, Any],
-    ) -> DRFResponse:
-        unread_count: int = Notification.objects.filter(
-            recipient=request.user,
-            is_read=False,
-        ).count()
-        return DRFResponse({"unread_count": unread_count}, status=HTTP_200_OK)
-
-    # ── GET /list/ ─────────────────────────────────────────────────────────
-
-    @action(methods=("GET",), detail=False, url_path="list", url_name="list")
-    def get_list(
-        self,
-        request: DRFRequest,
-        *args: tuple[Any, ...],
-        **kwargs: dict[str, Any],
-    ) -> DRFResponse:
-        notifications = (
-            Notification.objects.filter(recipient=request.user)
-            # comment → author, dish, daily_menu → canteen → school
-            .select_related(
-                "comment__author",
-                "comment__dish",
-                "comment__daily_menu__canteen__school",
-            )
-            .order_by("-created_at")
-        )
-
+    @action(methods=('GET',), detail=False, url_path='list', url_name='list', permission_classes=(IsAuthenticated,))
+    def get_list(self, request: DRFRequest, *args, **kwargs) -> DRFResponse:
+        notifications = Notification.objects.filter(user=request.user)
         paginator = PageNumberPagination()
         paginator.page_size = 20
-        # ↓ передаём инстанс request, а не класс DRFRequest
-        page = paginator.paginate_queryset(notifications, request)
+        page = paginator.paginate_queryset(notifications, request)  # ← был баг: DRFRequest класс вместо request
         serializer = NotificationSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
-    # ── POST /read/ ────────────────────────────────────────────────────────
-
-    @action(methods=("POST",), detail=False, url_path="read", url_name="read")
-    def mark_all_read(
-        self,
-        request: DRFRequest,
-        *args: tuple[Any, ...],
-        **kwargs: dict[str, Any],
-    ) -> DRFResponse:
-        """Пометить все непрочитанные уведомления как прочитанные."""
-        updated: int = Notification.objects.filter(
-            recipient=request.user,
-            is_read=False,
-        ).update(is_read=True)
-        return DRFResponse({"marked_read": updated}, status=HTTP_200_OK)
-
-    # ── POST /read-one/{id}/ ───────────────────────────────────────────────
-
-    @action(
-        methods=("POST",),
-        detail=True,                    # /notifications/{id}/read-one/
-        url_path="read-one",
-        url_name="read-one",
-    )
-    def mark_one_read(
-        self,
-        request: DRFRequest,
-        pk: int | None = None,
-        *args: tuple[Any, ...],
-        **kwargs: dict[str, Any],
-    ) -> DRFResponse:
-        """Пометить одно уведомление как прочитанное."""
-        notification = get_object_or_404(
-            Notification,
-            pk=pk,
-            recipient=request.user,   # защита: чужое уведомление → 404
-        )
-        if not notification.is_read:
-            notification.is_read = True
-            notification.save(update_fields=["is_read"])
-        return DRFResponse({"marked_read": True}, status=HTTP_200_OK)
+    @action(methods=('POST',), detail=False, url_path='read', url_name='read', permission_classes=(IsAuthenticated,))
+    def mark_read(self, request: DRFRequest, *args, **kwargs) -> DRFResponse:
+        updated = Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
+        return DRFResponse({'marked_read': updated}, status=HTTP_200_OK)
